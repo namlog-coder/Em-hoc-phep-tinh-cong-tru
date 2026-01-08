@@ -1,0 +1,7 @@
+{
+  "name": "Bé Học Toán - Gộp Nhóm Thông Minh",
+  "description": "An interactive math learning application for children focused on addition through grouping and counting, featuring high-quality Vietnamese AI voice feedback and playful themes.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
