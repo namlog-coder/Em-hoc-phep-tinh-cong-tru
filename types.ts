@@ -7,6 +7,7 @@ export enum GameState {
 }
 
 export type Difficulty = 'easy' | 'moderate' | 'hard';
+export type QuestionType = 'find_sum' | 'find_num1' | 'find_num2';
 
 export interface Theme {
   id: string;
@@ -24,4 +25,5 @@ export interface GameData {
   num2: number;
   sum: number;
   theme: Theme;
+  questionType: QuestionType;
 }

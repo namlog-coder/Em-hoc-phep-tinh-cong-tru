@@ -1,9 +1,9 @@
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { THEMES } from './constants';
-import { GameState, GameData, Difficulty } from './types';
-import { speakWithGemini, getEncouragement } from './services/geminiService';
-import { Assistant } from './components/Assistant';
+import { THEMES } from './constants.ts';
+import { GameState, GameData, Difficulty, QuestionType } from './types.ts';
+import { speakWithGemini, getEncouragement } from './services/geminiService.ts';
+import { Assistant } from './components/Assistant.tsx';
 
 const App: React.FC = () => {
   const [difficulty, setDifficulty] = useState<Difficulty>('easy');
@@ -20,19 +20,45 @@ const App: React.FC = () => {
 
   const teachingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const maxRange = difficulty === 'easy' ? 5 : difficulty === 'moderate' ? 10 : 20;
+  // Phạm vi kiến thức: Dễ (5), Vừa (8), Khó (10)
+  const maxRange = difficulty === 'easy' ? 5 : difficulty === 'moderate' ? 8 : 10;
 
-  const generateOptions = useCallback((correctSum: number) => {
-    const opts = [correctSum];
-    while (opts.length < 3) {
-      // Ensure range of options is appropriate for the level
-      const spread = difficulty === 'easy' ? 2 : 4;
-      const rand = Math.floor(Math.random() * (spread * 2 + 1)) + (correctSum - spread);
-      const validRand = Math.max(1, Math.min(maxRange + 2, rand));
-      if (!opts.includes(validRand)) opts.push(validRand);
+  const getTargetValue = (g: GameData) => {
+    if (g.questionType === 'find_num1') return g.num1;
+    if (g.questionType === 'find_num2') return g.num2;
+    return g.sum;
+  };
+
+  /**
+   * SỬA LỖI TẠI ĐÂY: Sử dụng Set và nới lỏng phạm vi số nhiễu để tránh vòng lặp vô hạn
+   */
+  const generateOptions = useCallback((targetValue: number) => {
+    const opts = new Set<number>();
+    opts.add(targetValue);
+    
+    // Sử dụng maxRange (ít nhất là 5) để luôn có đủ số tạo lựa chọn
+    const searchRange = Math.max(maxRange, 5);
+    
+    let safetyCounter = 0;
+    while (opts.size < 3 && safetyCounter < 50) {
+      safetyCounter++;
+      const rand = Math.floor(Math.random() * searchRange) + 1;
+      opts.add(rand);
     }
-    setOptions(opts.sort(() => Math.random() - 0.5));
-  }, [difficulty, maxRange]);
+    
+    // Fallback cực kỳ an toàn nếu Set vẫn không đủ 3 phần tử (hiếm khi xảy ra)
+    const finalArray = Array.from(opts);
+    while (finalArray.length < 3) {
+      for (let i = 1; i <= searchRange; i++) {
+        if (!finalArray.includes(i)) {
+          finalArray.push(i);
+          if (finalArray.length === 3) break;
+        }
+      }
+    }
+
+    setOptions(finalArray.sort(() => Math.random() - 0.5));
+  }, [maxRange]);
 
   const initGame = useCallback(() => {
     const theme = THEMES[Math.floor(Math.random() * THEMES.length)];
@@ -40,15 +66,37 @@ const App: React.FC = () => {
     const n1 = Math.floor(Math.random() * (sum - 1)) + 1;
     const n2 = sum - n1;
 
-    setGame({ num1: n1, num2: n2, sum, theme });
+    // Ngẫu nhiên chọn dạng bài: Tìm tổng, Tìm số hạng 1, Tìm số hạng 2
+    const questionTypes: QuestionType[] = ['find_sum', 'find_num1', 'find_num2'];
+    const questionType = questionTypes[Math.floor(Math.random() * questionTypes.length)];
+
+    const newGame: GameData = { num1: n1, num2: n2, sum, theme, questionType };
+    const targetValue = getTargetValue(newGame);
+
+    setGame(newGame);
     setGameState(GameState.PLAYING);
     setIsMerged(false);
     setWrongCount(0);
     setHighlightIdx(null);
     setSelectedAnswer(null);
-    generateOptions(sum);
+    
+    // Tạo options dựa trên giá trị cần tìm
+    generateOptions(targetValue);
 
     setTimeout(() => setIsMerged(true), 1500);
+
+    // AI đặt câu hỏi theo đúng dạng bài bằng Tiếng Việt
+    let questionVoice = "";
+    if (questionType === 'find_sum') {
+      questionVoice = `${n1} cộng ${n2} bằng mấy hả bé?`;
+    } else if (questionType === 'find_num1') {
+      questionVoice = `Mấy cộng với ${n2} thì bằng ${sum} nhỉ?`;
+    } else {
+      questionVoice = `${n1} cộng với mấy thì bằng ${sum} hả bé?`;
+    }
+    
+    // Đặt câu hỏi sau khi các khối đã gộp xong
+    setTimeout(() => speakWithGemini(questionVoice), 2200);
   }, [maxRange, generateOptions]);
 
   const handleStartPlaying = () => {
@@ -59,28 +107,32 @@ const App: React.FC = () => {
   const handleSelectAnswer = (val: number) => {
     if (gameState !== GameState.PLAYING) return;
     setSelectedAnswer(val);
-    speakWithGemini(val.toString());
+    speakWithGemini(`Bé chọn số ${val}`);
   };
 
   const handleCheckResult = async () => {
     if (gameState !== GameState.PLAYING || selectedAnswer === null || !game) return;
 
-    if (selectedAnswer === game.sum) {
+    const targetValue = getTargetValue(game);
+
+    if (selectedAnswer === targetValue) {
       setGameState(GameState.SUCCESS);
       setCorrectStreak(prev => prev + 1);
       
       const encouragement = await getEncouragement(true);
-      const mathFeedback = `${encouragement}. ${game.num1} cộng ${game.num2} bằng ${game.sum}, quá chính xác!`;
+      let mathFeedback = `${encouragement}. `;
+      if (game.questionType === 'find_num1') mathFeedback += `Đúng rồi, ${selectedAnswer} cộng ${game.num2} bằng ${game.sum}!`;
+      else if (game.questionType === 'find_num2') mathFeedback += `Chính xác, ${game.num1} cộng ${selectedAnswer} bằng ${game.sum}!`;
+      else mathFeedback += `${game.num1} cộng ${game.num2} bằng ${selectedAnswer}, quá giỏi!`;
       
       setAssistantMsg(mathFeedback);
       speakWithGemini(mathFeedback);
 
-      // Level up suggestion
       if (correctStreak + 1 >= 3 && difficulty !== 'hard') {
         setTimeout(() => {
-          setAssistantMsg("Bé đã làm đúng 3 câu liên tiếp rồi! Mình thử mức độ khó hơn nhé?");
-          speakWithGemini("Bé đã làm đúng 3 câu liên tiếp rồi! Mình thử mức độ khó hơn nhé?");
-        }, 3000);
+          setAssistantMsg("Bé giỏi quá! Mình thử mức độ khó hơn một chút nhé?");
+          speakWithGemini("Bé giỏi quá! Mình thử mức độ khó hơn một chút nhé?");
+        }, 3500);
       }
     } else {
       setWrongCount(prev => prev + 1);
@@ -115,21 +167,19 @@ const App: React.FC = () => {
       if (current >= total) {
         setGameState(GameState.PLAYING);
         setHighlightIdx(null);
-        setAssistantMsg("Vậy tất cả có bao nhiêu nhỉ?");
-        speakWithGemini("Vậy tất cả có bao nhiêu nhỉ?");
+        setAssistantMsg("Bé hãy nhìn kỹ các ô và chọn số đúng nhé!");
         return;
       }
 
       setHighlightIdx(current);
       speakWithGemini((current + 1).toString());
       current++;
-      teachingTimerRef.current = setTimeout(runStep, 1500);
+      teachingTimerRef.current = setTimeout(runStep, 1200);
     };
 
     setTimeout(runStep, 1000);
   };
 
-  // Welcome Screen
   if (gameState === GameState.IDLE) {
     return (
       <div className="fixed inset-0 bg-gradient-to-br from-yellow-100 via-pink-100 to-indigo-100 flex flex-col items-center justify-center overflow-hidden">
@@ -168,7 +218,6 @@ const App: React.FC = () => {
 
   return (
     <div className={`fixed inset-0 transition-colors duration-700 flex flex-col ${game.theme.bg}`}>
-      {/* Header */}
       <div className="p-4 flex items-center justify-between z-50">
         <div className="flex items-center gap-3">
           <button 
@@ -185,7 +234,6 @@ const App: React.FC = () => {
           </button>
         </div>
 
-        {/* Level Selector */}
         <div className="bg-white/70 backdrop-blur-md p-2 rounded-3xl shadow-lg flex gap-2">
           {(['easy', 'moderate', 'hard'] as Difficulty[]).map(lvl => (
             <button
@@ -193,7 +241,7 @@ const App: React.FC = () => {
               onClick={() => { setDifficulty(lvl); initGame(); }}
               className={`px-4 py-2 rounded-2xl font-black text-sm transition-all ${difficulty === lvl ? 'bg-indigo-600 text-white shadow-inner' : 'text-indigo-400 hover:bg-white'}`}
             >
-              {lvl === 'easy' ? 'Dễ' : lvl === 'moderate' ? 'Hơi Khó' : 'Khó'}
+              {lvl === 'easy' ? 'Dễ' : lvl === 'moderate' ? 'Vừa' : 'Khó'}
             </button>
           ))}
         </div>
@@ -203,22 +251,20 @@ const App: React.FC = () => {
         </div>
       </div>
 
-      {/* Settings Modal */}
       {showSettings && (
         <div className="fixed inset-0 z-[100] bg-black/80 flex items-center justify-center p-4">
           <div className="bg-white rounded-3xl p-8 max-w-sm w-full text-center shadow-2xl animate-in zoom-in">
-            <h2 className="text-3xl font-black text-indigo-600 mb-6">Cài đặt</h2>
+            <h2 className="text-3xl font-black text-indigo-600 mb-6">Chọn mức độ</h2>
             <div className="space-y-4">
-              <button onClick={() => { setDifficulty('easy'); setShowSettings(false); initGame(); }} className={`w-full p-4 rounded-2xl font-bold text-xl ${difficulty === 'easy' ? 'bg-green-500 text-white' : 'bg-gray-100'}`}>Mức độ Dễ (Phạm vi 5)</button>
-              <button onClick={() => { setDifficulty('moderate'); setShowSettings(false); initGame(); }} className={`w-full p-4 rounded-2xl font-bold text-xl ${difficulty === 'moderate' ? 'bg-blue-500 text-white' : 'bg-gray-100'}`}>Mức độ Hơi Khó (Phạm vi 10)</button>
-              <button onClick={() => { setDifficulty('hard'); setShowSettings(false); initGame(); }} className={`w-full p-4 rounded-2xl font-bold text-xl ${difficulty === 'hard' ? 'bg-red-500 text-white' : 'bg-gray-100'}`}>Mức độ Khó (Phạm vi 20)</button>
+              <button onClick={() => { setDifficulty('easy'); setShowSettings(false); initGame(); }} className={`w-full p-4 rounded-2xl font-bold text-xl ${difficulty === 'easy' ? 'bg-green-500 text-white' : 'bg-gray-100'}`}>Mức độ Dễ (Trong phạm vi 5)</button>
+              <button onClick={() => { setDifficulty('moderate'); setShowSettings(false); initGame(); }} className={`w-full p-4 rounded-2xl font-bold text-xl ${difficulty === 'moderate' ? 'bg-blue-500 text-white' : 'bg-gray-100'}`}>Mức độ Vừa (Trong phạm vi 8)</button>
+              <button onClick={() => { setDifficulty('hard'); setShowSettings(false); initGame(); }} className={`w-full p-4 rounded-2xl font-bold text-xl ${difficulty === 'hard' ? 'bg-red-500 text-white' : 'bg-gray-100'}`}>Mức độ Khó (Trong phạm vi 10)</button>
             </div>
             <button onClick={() => setShowSettings(false)} className="mt-8 text-gray-400 font-bold underline">Đóng</button>
           </div>
         </div>
       )}
 
-      {/* Main Game Stage */}
       <div className="flex-grow flex flex-col items-center justify-center px-4 relative">
         {gameState === GameState.SUCCESS && (
           <div className="absolute inset-0 pointer-events-none flex items-center justify-center overflow-hidden z-0">
@@ -252,36 +298,44 @@ const App: React.FC = () => {
           </div>
         </div>
 
-        {/* Calculation */}
         <div className={`mt-10 md:mt-16 py-6 px-12 bg-white/80 backdrop-blur-md rounded-3xl shadow-2xl flex items-center gap-6 text-6xl md:text-8xl font-black ${game.theme.textColor}`}>
-          <span>{game.num1}</span>
+          <span className={`${game.questionType === 'find_num1' ? 'text-indigo-500 min-w-[1.5ch] text-center border-b-4 border-indigo-200' : ''}`}>
+            {game.questionType === 'find_num1' 
+              ? (gameState === GameState.SUCCESS ? game.num1 : (selectedAnswer ?? '?')) 
+              : game.num1}
+          </span>
           <span className="text-indigo-400 opacity-60">+</span>
-          <span>{game.num2}</span>
+          <span className={`${game.questionType === 'find_num2' ? 'text-indigo-500 min-w-[1.5ch] text-center border-b-4 border-indigo-200' : ''}`}>
+            {game.questionType === 'find_num2' 
+              ? (gameState === GameState.SUCCESS ? game.num2 : (selectedAnswer ?? '?')) 
+              : game.num2}
+          </span>
           <span className="text-indigo-400 opacity-60">=</span>
-          <span className={`transition-all duration-500 min-w-[1ch] text-center ${gameState === GameState.SUCCESS ? 'text-green-500 scale-110 drop-shadow-md' : 'text-indigo-500'}`}>
-            {gameState === GameState.SUCCESS ? game.sum : (selectedAnswer ?? '?')}
+          <span className={`${game.questionType === 'find_sum' ? 'text-indigo-500 min-w-[1.5ch] text-center border-b-4 border-indigo-200' : ''}`}>
+            {game.questionType === 'find_sum' 
+              ? (gameState === GameState.SUCCESS ? game.sum : (selectedAnswer ?? '?')) 
+              : game.sum}
           </span>
         </div>
       </div>
 
-      {/* Interaction Area */}
       <div className="bg-white/90 backdrop-blur-xl p-8 shadow-[0_-20px_40px_rgba(0,0,0,0.05)] flex flex-col items-center gap-6 z-30 rounded-t-[50px]">
         {gameState === GameState.SUCCESS ? (
           <div className="flex flex-col items-center gap-4 animate-in slide-in-from-bottom duration-500">
-            <h3 className="text-2xl md:text-3xl font-black text-green-600 mb-2">Đúng rồi! 🎉 Bé quá tuyệt vời!</h3>
+            <h3 className="text-2xl md:text-3xl font-black text-green-600 mb-2">Đúng rồi! 🎉 Bé giỏi quá!</h3>
             <div className="flex gap-4">
                <button
                 onClick={initGame}
                 className="bg-green-500 text-white px-16 py-6 rounded-full text-3xl md:text-5xl font-black shadow-2xl border-b-[10px] border-green-700 hover:scale-105 active:border-b-0 active:translate-y-2 transition-all"
               >
-                Tiếp tục 🚀
+                Câu tiếp theo 🚀
               </button>
               {correctStreak >= 3 && difficulty !== 'hard' && (
                 <button
                   onClick={nextLevel}
                   className="bg-indigo-600 text-white px-10 py-6 rounded-full text-3xl md:text-4xl font-black shadow-2xl border-b-[10px] border-indigo-800 hover:scale-105 active:border-b-0 active:translate-y-2 transition-all flex items-center gap-3"
                 >
-                  Khó hơn nào! 📈
+                  Thử mức khó hơn! 📈
                 </button>
               )}
             </div>
